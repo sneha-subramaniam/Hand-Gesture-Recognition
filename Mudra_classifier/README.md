@@ -10,7 +10,7 @@ From this folder run:
 
 Then open http://localhost:8000/web/ in Chrome, Safari or Edge, click "Start camera" and allow access. Everything runs locally in the browser. The camera page must be served over http://localhost or https (opening index.html as a file will not get camera access).
 
-To share it, enable GitHub Pages for the repo and open `https://<user>.github.io/<repo>/Mudra_classifier/web/`.
+To host it on Vercel: import the repo with Framework Preset "Other", no build command, and Root Directory either the repo root or `Mudra_classifier`. The included `vercel.json` sends `/` to the webpage. You can also enable GitHub Pages for the repo and open `https://<user>.github.io/<repo>/Mudra_classifier/web/`.
 
 ## Option 2: Desktop Python app
 
