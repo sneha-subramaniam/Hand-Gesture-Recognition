@@ -1,5 +1,5 @@
 import { FilesetResolver, HandLandmarker, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { MudraModel, landmarksToRaw } from "./classifier.js";
+import { Recognizer, toPixels } from "./classifier.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const LANDMARKER_LOCAL = "../hand_landmarker.task";
@@ -8,12 +8,14 @@ const SMOOTH = 8; // frames of probability averaging
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
-let landmarker, model, stream, history = [], threshold = 0.6, lastTs = -1, frames = 0, fpsT = performance.now(), fps = 0;
+let landmarker, recognizer, stream, threshold = 0.6, mode = "auto", lastTs = -1, frames = 0, fpsT = performance.now(), fps = 0;
+let history = new Map(); // who -> recent probability vectors
 
 $("thr").oninput = (e) => { threshold = e.target.value / 100; $("thrv").textContent = e.target.value + "%"; };
+$("mode").onchange = (e) => { mode = e.target.value; history.clear(); };
 
 async function init() {
-  model = await MudraModel.load("model.json");
+  recognizer = await Recognizer.load("model.json");
   const vision = await FilesetResolver.forVisionTasks(WASM);
   const opts = (path, delegate) => ({
     baseOptions: { modelAssetPath: path, delegate },
@@ -61,49 +63,46 @@ async function startCamera(deviceId) {
 $("start").onclick = () => startCamera($("cams").value || undefined);
 $("cams").onchange = (e) => startCamera(e.target.value);
 
-function predict(hands) {
-  // Score both hands together and each hand alone. Use the combined result
-  // unless a single hand is clearly more confident (e.g. a one-hand mudra with
-  // the other hand resting in view).
-  const cands = [model.predict(landmarksToRaw(hands))];
-  if (hands.length > 1) hands.forEach((h) => cands.push(model.predict(landmarksToRaw([h]))));
-  const best = (p) => Math.max(...p);
-  let p = cands[0];
-  for (const c of cands.slice(1)) if (best(c) > best(p) + 0.25) p = c;
-  return p;
+function smooth(who, probs) {
+  const h = history.get(who) || [];
+  h.push(probs); if (h.length > SMOOTH) h.shift();
+  history.set(who, h);
+  const avg = new Float32Array(probs.length);
+  h.forEach((p) => p.forEach((v, i) => (avg[i] += v / h.length)));
+  return avg;
 }
 
-function render(probs) {
+function block(who, probs, showWho) {
   const order = [...probs.keys()].sort((a, b) => probs[b] - probs[a]).slice(0, 3);
-  const top = probs[order[0]];
-  const el = $("label");
-  if (top >= threshold) { el.textContent = model.classes[order[0]]; el.className = "big ok"; }
-  else { el.textContent = "Not sure yet"; el.className = "big wait"; }
-  $("top").innerHTML = order.map((i) => `<div class="row"><span>${model.classes[i]}</span><span>${Math.round(probs[i] * 100)}%</span></div><div class="bar"><i style="width:${probs[i] * 100}%"></i></div>`).join("");
+  const names = recognizer.classes, ok = probs[order[0]] >= threshold;
+  return `${showWho ? `<div class="who">${who}</div>` : ""}
+    <div class="big ${ok ? "ok" : "wait"}">${ok ? names[order[0]] : "Not sure yet"}</div>
+    ${order.map((i) => `<div class="row"><span>${names[i]}</span><span>${Math.round(probs[i] * 100)}%</span></div><div class="bar"><i style="width:${probs[i] * 100}%"></i></div>`).join("")}`;
 }
 
 function loop() {
   if (!stream?.active) return;
   if (video.readyState >= 2) {
-    if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+    const W = video.videoWidth, H = video.videoHeight;
+    if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
     let ts = performance.now(); if (ts <= lastTs) ts = lastTs + 1; lastTs = ts;
     const res = landmarker.detectForVideo(video, ts);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (res.landmarks.length) {
-      const du = new DrawingUtils(ctx);
-      res.landmarks.forEach((lm) => {
-        du.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: "#ec8a5f", lineWidth: 3 });
-        du.drawLandmarks(lm, { color: "#fff", radius: 3 });
-      });
-      history.push(predict(res.landmarks));
-      if (history.length > SMOOTH) history.shift();
-      const avg = new Float32Array(model.classes.length);
-      history.forEach((p) => p.forEach((v, i) => (avg[i] += v / history.length)));
-      render(avg);
-    } else {
-      history = [];
-      $("label").textContent = "Show your hand(s)"; $("label").className = "big wait"; $("top").innerHTML = "";
-    }
+    ctx.clearRect(0, 0, W, H);
+    const du = new DrawingUtils(ctx);
+    res.landmarks.forEach((lm) => {
+      du.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: "#ec8a5f", lineWidth: 3 });
+      du.drawLandmarks(lm, { color: "#fff", radius: 3 });
+    });
+
+    const out = recognizer.predict(res.landmarks.map((lm) => toPixels(lm, W, H)), mode);
+    const seen = new Set(out.map((o) => o.who));
+    for (const k of [...history.keys()]) if (!seen.has(k)) history.delete(k);
+    let html;
+    if (!res.landmarks.length) html = `<div class="big wait">Show your hand(s)</div>`;
+    else if (!out.length) html = `<div class="big wait">Bring your hands together</div>`;
+    else html = out.map((o) => block(o.who, smooth(o.who, o.probs), out.length > 1 || o.who === "Both hands")).join("");
+    $("results").innerHTML = html;
+
     frames++;
     const now = performance.now();
     if (now - fpsT > 1000) { fps = frames; frames = 0; fpsT = now; }
