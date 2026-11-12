@@ -1,29 +1,45 @@
 # Mudra Classifier
 
-Recognises 50 Bharatanatyam mudras from hand landmarks (MediaPipe Hand Landmarker + a small neural network).
+Recognises 50 Bharatanatyam mudras (29 single-hand, 21 two-hand) from hand landmarks, using MediaPipe Hand Landmarker plus two small neural networks.
 
-## Option 1: Browser (recommended, works on Mac without camera hassles)
+## How it decides single vs two-hand
 
-From this folder run:
+- Two hands close together (within 1.5 palm lengths): two-hand model, which also uses how the hands sit relative to each other.
+- Two hands far apart: the other hand is just resting in view, so each hand is classified on its own against single-hand mudras.
+- One hand: one-hand model over all mudras. Overlapping two-hand mudras such as Matsya or Varaha often look like a single hand to the detector, so they stay possible.
+
+Use the mode menu ("Single-hand mudras only" or "Two-hand mudras only") when practising one group. That removes most remaining mix-ups.
+
+## Option 1: Browser (recommended)
+
+Live on Vercel, or locally from this folder:
 
     python3 -m http.server 8000
 
-Then open http://localhost:8000/web/ in Chrome, Safari or Edge, click "Start camera" and allow access. Everything runs locally in the browser. The camera page must be served over http://localhost or https (opening index.html as a file will not get camera access).
+Then open http://localhost:8000/web/ and click "Start camera". Everything runs in the browser and no video leaves the device.
 
-To host it on Vercel: import the repo with Framework Preset "Other", no build command, and Root Directory either the repo root or `Mudra_classifier`. The included `vercel.json` sends `/` to the webpage. You can also enable GitHub Pages for the repo and open `https://<user>.github.io/<repo>/Mudra_classifier/web/`.
+Vercel settings: Framework Preset "Other", no build command, Root Directory either the repo root or `Mudra_classifier`. The included `vercel.json` sends `/` to the webpage.
 
 ## Option 2: Desktop Python app
 
     pip install -r requirements.txt
-    python train_model.py      # about 1 minute, creates mudra_model.p and web/model.json
-    python app.py              # or: python app.py --camera 1
+    python train_model.py          # about 1 minute, creates mudra_model.p and web/model.json
+    python app.py                  # options: --camera 1, --mode single|double, --threshold 0.6
 
 On macOS, if the camera does not open: System Settings > Privacy & Security > Camera, enable the app you run Python from (Terminal, iTerm, VS Code, PyCharm) and fully restart it. Close Zoom, FaceTime and Photo Booth. If an iPhone shows up as a Continuity Camera, try `--camera 1`.
 
+## Retraining from the images
+
+    git clone --depth 1 https://github.com/jisharajr/Bharatanatyam-Mudra-Dataset
+    python collect_data.py --data ./Bharatanatyam-Mudra-Dataset   # about 3 minutes, creates mudra_landmarks.npz
+    python train_model.py
+
 ## Files
 
-- `features.py` shared feature pipeline (normalisation + augmentation)
-- `train_model.py` trains the model and exports it for Python and the browser
+- `features.py` feature maths shared by training and both apps
+- `recognizer.py` picks the one-hand or two-hand model for each frame
+- `collect_data.py` images to `mudra_landmarks.npz` (pixel-space landmarks of up to 2 hands)
+- `train_model.py` trains both models, prints held-out accuracy, exports `mudra_model.p` and `web/model.json`
 - `app.py` desktop webcam app
-- `web/` browser app (`classifier.js` mirrors `features.py`)
-- `collect_data.py` rebuilds `mudra_data.csv` from the image dataset folder
+- `web/` browser app (`classifier.js` mirrors `features.py` and `recognizer.py`)
+- `mudra_data.csv` older landmark export, no longer used by training (it lacks hand positions)

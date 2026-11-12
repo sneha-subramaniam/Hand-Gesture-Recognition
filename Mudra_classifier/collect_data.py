@@ -1,71 +1,78 @@
+"""Extract hand landmarks from the image dataset into mudra_landmarks.npz.
+
+Dataset: https://github.com/jisharajr/Bharatanatyam-Mudra-Dataset
+
+    git clone --depth 1 https://github.com/jisharajr/Bharatanatyam-Mudra-Dataset
+    python collect_data.py --data ./Bharatanatyam-Mudra-Dataset
+
+Landmarks are stored in pixel units for every detected hand (up to 2), so the
+position of the hands relative to each other is kept.
+"""
+import argparse
 import os
-import cv2
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-import pandas as pd
+from multiprocessing import Pool
+
 import numpy as np
 
-# --- CONFIGURATION ---
-DATA_PATH = './Bharatanatyam-Mudra-Dataset'
-MODEL_PATH = 'hand_landmarker.task'
-OUTPUT_FILE = 'mudra_data.csv'
+from features import clean_label
 
-# 1. Initialize Landmarker
-base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2)
-detector = vision.HandLandmarker.create_from_options(options)
+MODEL_PATH = "hand_landmarker.task"
+_detector = None
 
-data = []
 
-print(f"Starting relative extraction from: {DATA_PATH}")
+def _init():
+    global _detector
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+    options = vision.HandLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=MODEL_PATH),
+        num_hands=2, min_hand_detection_confidence=0.3, min_hand_presence_confidence=0.3)
+    _detector = vision.HandLandmarker.create_from_options(options)
 
-for label in os.listdir(DATA_PATH):
-    label_path = os.path.join(DATA_PATH, label)
-    if not os.path.isdir(label_path) or label.startswith('.'):
-        continue
 
-    print(f"Processing Mudra: {label}...")
+def _extract(item):
+    import mediapipe as mp
+    label, path = item
+    try:
+        image = mp.Image.create_from_file(path)
+        result = _detector.detect(image)
+    except Exception:
+        return None
+    hands = np.full((2, 21, 3), np.nan, np.float32)
+    for i, hand in enumerate(result.hand_landmarks[:2]):
+        hands[i] = [[lm.x * image.width, lm.y * image.height, lm.z * image.width] for lm in hand]
+    return label, os.path.basename(path), hands, len(result.hand_landmarks[:2])
 
-    for img_name in os.listdir(label_path):
-        if not img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="./Bharatanatyam-Mudra-Dataset")
+    ap.add_argument("--out", default="mudra_landmarks.npz")
+    ap.add_argument("--workers", type=int, default=os.cpu_count())
+    args = ap.parse_args()
+
+    items = []
+    for folder in sorted(os.listdir(args.data)):
+        d = os.path.join(args.data, folder)
+        if folder.startswith(".") or not os.path.isdir(d):
             continue
+        items += [(clean_label(folder), os.path.join(d, f)) for f in sorted(os.listdir(d))
+                  if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+    print(f"{len(items)} images in {args.data}")
 
-        full_img_path = os.path.join(label_path, img_name)
-        
-        try:
-            image = mp.Image.create_from_file(full_img_path)
-            detection_result = detector.detect(image)
+    rows = []
+    with Pool(args.workers, initializer=_init) as pool:
+        for i, r in enumerate(pool.imap(_extract, items, chunksize=32)):
+            if r is not None and r[3] > 0:
+                rows.append(r)
+            if i % 2000 == 0:
+                print(f"  {i}/{len(items)}", flush=True)
 
-            if detection_result.hand_landmarks:
-                all_coords = []
-                
-                for hand_landmarks in detection_result.hand_landmarks:
-                    # THE FIX: Use the wrist (landmark 0) as the origin (0,0,0)
-                    wrist = hand_landmarks[0]
-                    
-                    for lm in hand_landmarks:
-                        # Store distance from wrist instead of screen position
-                        all_coords.extend([
-                            lm.x - wrist.x, 
-                            lm.y - wrist.y, 
-                            lm.z - wrist.z
-                        ])
-                
-                # Padding to 126 features
-                if len(all_coords) < 126:
-                    all_coords.extend([0.0] * (126 - len(all_coords)))
-                
-                final_row = all_coords[:126]
-                final_row.append(label)
-                data.append(final_row)
+    labels, files, hands, n_hands = zip(*rows)
+    np.savez_compressed(args.out, labels=np.array(labels), files=np.array(files),
+                        hands=np.stack(hands), n_hands=np.array(n_hands, np.int8))
+    print(f"Saved {len(rows)} samples with hands to {args.out}")
 
-        except Exception as e:
-            continue
 
-# 4. Save to CSV
-if data:
-    columns = [f'coord_{i}' for i in range(126)] + ['label']
-    df = pd.DataFrame(data, columns=columns)
-    df.to_csv(OUTPUT_FILE, index=False)
-    print(f"\nSuccess! New relative dataset saved as: {OUTPUT_FILE}")
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,6 @@ usually the easier route. See README.md.
 """
 import argparse
 import collections
-import pickle
 import platform
 import sys
 import time
@@ -19,7 +18,8 @@ import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from features import landmarks_to_raw, normalize
+from features import to_pixels
+from recognizer import Recognizer
 
 WINDOW = "Mudra Recognizer (press q to quit)"
 SMOOTH = 8
@@ -58,22 +58,35 @@ def open_camera(preferred=None):
     sys.exit(msg)
 
 
+def draw_results(frame, results, threshold, classes):
+    y = 45
+    for who, probs in results:
+        top = np.argsort(probs)[::-1][:3]
+        if len(results) > 1 or who == "Both hands":
+            cv2.putText(frame, who.upper(), (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 2)
+            y += 34
+        if probs[top[0]] >= threshold:
+            text, color = f"{classes[top[0]]} ({probs[top[0]]:.0%})", (60, 200, 60)
+        else:
+            text, color = "Not sure yet", (0, 165, 255)
+        cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 5)
+        cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2)
+        y += 32
+        for k in top:
+            cv2.putText(frame, f"{classes[k]}: {probs[k]:.0%}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            y += 24
+        y += 20
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera", type=int, default=None)
     ap.add_argument("--threshold", type=float, default=0.6)
+    ap.add_argument("--mode", choices=["auto", "single", "double"], default="auto",
+                    help="auto = all mudras, single = single-hand only, double = two-hand only")
     args = ap.parse_args()
 
-    with open("mudra_model.p", "rb") as f:
-        bundle = pickle.load(f)
-    if "scaler" not in bundle:
-        sys.exit("mudra_model.p is from the old training script. Run: python train_model.py")
-    clf, scaler = bundle["model"], bundle["scaler"]
-    classes = clf.classes_
-
-    def predict(raw):
-        return clf.predict_proba(scaler.transform(normalize(raw[None])))[0]
-
+    recognizer = Recognizer("mudra_model.p")
     options = vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path="hand_landmarker.task"),
         running_mode=vision.RunningMode.VIDEO,
@@ -84,7 +97,7 @@ def main():
     )
     detector = vision.HandLandmarker.create_from_options(options)
     cap = open_camera(args.camera)
-    history = collections.deque(maxlen=SMOOTH)
+    history = {}  # who -> recent probability vectors
     last_ts, misses = 0, 0
 
     while True:
@@ -111,29 +124,24 @@ def main():
             for p in pts:
                 cv2.circle(frame, p, 3, (255, 255, 255), -1)
 
-        frame = cv2.flip(frame, 1)  # mirror for display only (model is mirror-invariant)
+        frame = cv2.flip(frame, 1)  # mirror for display only
 
-        if hands:
-            probs = predict(landmarks_to_raw(hands))
-            if len(hands) > 1:  # a one-hand mudra with the other hand resting in view
-                for single in (predict(landmarks_to_raw([hd])) for hd in hands):
-                    if single.max() > probs.max() + 0.25:
-                        probs = single
-            history.append(probs)
-            avg = np.mean(history, axis=0)
-            top = np.argsort(avg)[::-1][:3]
-            if avg[top[0]] >= args.threshold:
-                text, color = f"{classes[top[0]]} ({avg[top[0]]:.0%})", (60, 200, 60)
-            else:
-                text, color = "Not sure yet", (0, 165, 255)
-            cv2.putText(frame, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 5)
-            cv2.putText(frame, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
-            for i, k in enumerate(top):
-                cv2.putText(frame, f"{classes[k]}: {avg[k]:.0%}", (20, 90 + 28 * i),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        else:
-            history.clear()
+        results = recognizer.predict([to_pixels(hd, w, h) for hd in hands], args.mode)
+        for k in list(history):
+            if k not in {who for who, _ in results}:
+                del history[k]
+        smoothed = []
+        for who, probs in results:
+            dq = history.setdefault(who, collections.deque(maxlen=SMOOTH))
+            dq.append(probs)
+            smoothed.append((who, np.mean(dq, axis=0)))
+
+        if not hands:
             cv2.putText(frame, "Show your hand(s)", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+        elif not results:
+            cv2.putText(frame, "Bring your hands together", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+        else:
+            draw_results(frame, smoothed, args.threshold, recognizer.classes)
 
         cv2.imshow(WINDOW, frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

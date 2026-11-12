@@ -3,3 +3,4 @@
 *.p
 requirements.txt
 .DS_Store
+*.npz

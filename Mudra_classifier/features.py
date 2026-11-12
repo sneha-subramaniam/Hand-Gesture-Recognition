@@ -1,68 +1,84 @@
 """Shared feature pipeline for training, the Python app and the browser app.
 
-Raw input: up to 2 hands x 21 landmarks x (x, y, z), wrist-relative, zero-padded
-to 126 values (this is the format stored in mudra_data.csv).
+Landmarks are always converted to pixel units first (x*W, y*H, z*W) so the
+camera's aspect ratio no longer distorts hand shape.
 
-normalize() makes the features independent of:
-  * distance from camera  -> every hand is scaled to unit palm length
-  * camera aspect ratio    -> handled by training-time augmentation
-  * mirroring / left-right -> handled by training-time augmentation
-  * hand order             -> handled by training-time augmentation
-The browser app (web/app.js) implements exactly the same normalize().
+Two models are used:
+  * one-hand model:  63 features = one hand's shape
+  * two-hand model: 130 features = both hands' shapes + how the hands sit
+                     relative to each other (offset, size ratio, gap)
+
+route() decides which model applies to a frame. The browser app
+(web/classifier.js) implements exactly the same maths.
 """
 import numpy as np
 
-N_HANDS, N_LM = 2, 21
-PALM = 9  # middle finger MCP; wrist->MCP9 is a rigid "palm length"
+PALM = 9           # middle finger MCP; wrist->MCP9 is a rigid "palm length"
+TOUCH_GAP = 1.5    # two hands closer than this many palm lengths = two-hand mudra
 
-
-def landmarks_to_raw(hand_landmarks_list):
-    """MediaPipe hand_landmarks result -> 126 wrist-relative values."""
-    coords = []
-    for hand in hand_landmarks_list[:N_HANDS]:
-        w = hand[0]
-        for lm in hand:
-            coords.extend([lm.x - w.x, lm.y - w.y, lm.z - w.z])
-    coords.extend([0.0] * (N_HANDS * N_LM * 3 - len(coords)))
-    return np.array(coords, dtype=np.float32)
-
-
-def normalize(raw):
-    """raw: (..., 126) -> (..., 126) scale-normalised per hand."""
-    A = np.asarray(raw, dtype=np.float32).reshape(-1, N_HANDS, N_LM, 3).copy()
-    palm = np.linalg.norm(A[:, :, PALM, :2], axis=-1, keepdims=True)[..., None]
-    present = palm > 1e-6
-    A = np.where(present, A / np.where(present, palm, 1.0), 0.0)
-    return A.reshape(np.shape(raw))
-
-
-def augment(raw, rng, copies=4):
-    """Return augmented copies of raw (wrist-relative) samples."""
-    A = np.asarray(raw, dtype=np.float32).reshape(-1, N_HANDS, N_LM, 3)
-    out = [A]
-    for _ in range(copies):
-        B = A.copy()
-        n = len(B)
-        # mirror half the samples (selfie view / left vs right hand)
-        flip = rng.random(n) < 0.5
-        B[flip, :, :, 0] *= -1
-        # aspect ratio / anisotropic distortion (webcam 16:9 vs photos)
-        B[:, :, :, 0] *= rng.uniform(0.7, 1.4, n)[:, None, None]
-        # small in-plane rotation
-        t = np.deg2rad(rng.uniform(-15, 15, n))[:, None, None]
-        x, y = B[..., 0].copy(), B[..., 1].copy()
-        B[..., 0] = x * np.cos(t) - y * np.sin(t)
-        B[..., 1] = x * np.sin(t) + y * np.cos(t)
-        # landmark jitter (relative to hand size)
-        size = np.linalg.norm(B[:, :, PALM, :2], axis=-1)[..., None, None]
-        B += rng.normal(0, 0.03, B.shape).astype(np.float32) * size
-        # swap hand order for two-hand samples (MediaPipe order is arbitrary)
-        two = np.abs(B[:, 1]).sum(axis=(1, 2)) > 0
-        swap = two & (rng.random(n) < 0.5)
-        B[swap] = B[swap][:, ::-1]
-        out.append(B)
-    return np.concatenate(out).reshape(-1, N_HANDS * N_LM * 3)
+DOUBLE = {
+    "Anjali", "Berunda", "Chakra", "Garuda", "Kapotham", "Karkatta", "Kartariswastika",
+    "Katakavardhana", "Khatva", "Kilaka", "Kurma", "Matsya", "Nagabandha", "Pasha",
+    "Pushpaputa", "Sakata", "Samputa", "Shanka", "Shivalinga", "Swastikam", "Varaha",
+}
 
 
 def clean_label(label):
     return str(label).replace("(1)", "").replace("_", " ").strip()
+
+
+def to_pixels(hand_landmarks, width, height):
+    """MediaPipe landmarks of one hand -> (21, 3) array in pixel units."""
+    return np.array([[lm.x * width, lm.y * height, lm.z * width] for lm in hand_landmarks],
+                    dtype=np.float32)
+
+
+def palm_length(h):
+    return np.linalg.norm(h[..., PALM, :2] - h[..., 0, :2], axis=-1)
+
+
+def hand_features(h):
+    """(..., 21, 3) pixel landmarks -> (..., 63) wrist-relative, unit palm length."""
+    rel = h - h[..., :1, :]
+    return (rel / palm_length(h)[..., None, None]).reshape(*h.shape[:-2], 63)
+
+
+def hand_gap(a, b):
+    """Smallest distance between the two hands, in mean palm lengths."""
+    d = np.linalg.norm(a[..., :, None, :2] - b[..., None, :, :2], axis=-1).min(axis=(-1, -2))
+    return d / ((palm_length(a) + palm_length(b)) / 2)
+
+
+def order_pair(a, b):
+    """Canonical order: hand whose wrist is further left in the image first."""
+    swap = a[..., 0, 0] > b[..., 0, 0]
+    s = swap[..., None, None]
+    return np.where(s, b, a), np.where(s, a, b)
+
+
+def pair_features(a, b):
+    """(..., 21, 3) x2 pixel landmarks -> (..., 130)."""
+    a, b = order_pair(a, b)
+    pa, pb = palm_length(a), palm_length(b)
+    mean = (pa + pb) / 2
+    offset = (b[..., 0, :2] - a[..., 0, :2]) / mean[..., None]
+    extra = np.concatenate([offset, np.log(pb / pa)[..., None], hand_gap(a, b)[..., None]], axis=-1)
+    return np.concatenate([hand_features(a), hand_features(b), extra], axis=-1)
+
+
+def augment(hands, rng):
+    """Random mirror, rotation, scale and landmark noise. hands: (N, k, 21, 3)."""
+    H = hands.copy()
+    n = len(H)
+    centre = H[..., :2].mean(axis=(1, 2), keepdims=True)
+    H[..., :2] -= centre
+    flip = rng.random(n) < 0.5
+    H[flip, ..., 0] *= -1                       # mirror: selfie view, left vs right hand
+    t = np.deg2rad(rng.uniform(-15, 15, n))[:, None, None]
+    x, y = H[..., 0].copy(), H[..., 1].copy()
+    H[..., 0] = x * np.cos(t) - y * np.sin(t)
+    H[..., 1] = x * np.sin(t) + y * np.cos(t)
+    H[..., 0] *= rng.uniform(0.85, 1.15, n)[:, None, None]  # mild stretch
+    size = palm_length(H).mean(axis=1)[:, None, None, None]
+    H += rng.normal(0, 0.03, H.shape).astype(np.float32) * size
+    return H

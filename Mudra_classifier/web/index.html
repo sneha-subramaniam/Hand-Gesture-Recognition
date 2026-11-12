@@ -28,6 +28,8 @@
   button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
   .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; align-items:center; }
   label { font-size:.9rem; color:var(--muted); }
+  .who { font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-top:14px; }
+  .who:first-child { margin-top:0; }
   .stat { font-size:.85rem; color:var(--muted); margin-top:12px; }
 </style>
 </head>
@@ -44,13 +46,17 @@
       </div>
       <div class="controls">
         <button class="primary" id="start">Start camera</button>
+        <select id="mode" title="Which mudras to look for">
+          <option value="auto">All mudras</option>
+          <option value="single">Single-hand mudras only</option>
+          <option value="double">Two-hand mudras only</option>
+        </select>
         <select id="cams" hidden></select>
         <label>Min confidence <input type="range" id="thr" min="30" max="95" value="60"> <span id="thrv">60%</span></label>
       </div>
     </div>
     <div class="card">
-      <div id="label" class="big wait">Waiting for camera</div>
-      <div id="top"></div>
+      <div id="results"><div class="big wait">Waiting for camera</div></div>
       <div class="stat" id="stat"></div>
     </div>
   </div>
