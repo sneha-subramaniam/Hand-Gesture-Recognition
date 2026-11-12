@@ -30,6 +30,13 @@
   label { font-size:.9rem; color:var(--muted); }
   .who { font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-top:14px; }
   .who:first-child { margin-top:0; }
+  .side { display:flex; flex-direction:column; gap:16px; }
+  h2 { font-size:1.05rem; margin:0 0 4px; }
+  .hint { font-size:.85rem; color:var(--muted); margin:4px 0 0; }
+  .match { font-size:.8rem; color:var(--ok); margin-top:2px; }
+  .taught { display:flex; justify-content:space-between; align-items:center; font-size:.9rem; padding:6px 0; border-bottom:1px solid var(--line); }
+  .taught button { padding:2px 10px; font-size:.8rem; }
+  #taughtList { margin-top:8px; }
   .stat { font-size:.85rem; color:var(--muted); margin-top:12px; }
 </style>
 </head>
@@ -55,9 +62,27 @@
         <label>Min confidence <input type="range" id="thr" min="30" max="95" value="60"> <span id="thrv">60%</span></label>
       </div>
     </div>
-    <div class="card">
-      <div id="results"><div class="big wait">Waiting for camera</div></div>
-      <div class="stat" id="stat"></div>
+    <div class="side">
+      <div class="card">
+        <div id="results"><div class="big wait">Waiting for camera</div></div>
+        <div class="stat" id="stat"></div>
+      </div>
+      <div class="card">
+        <h2>Teach your version</h2>
+        <p class="hint">If a mudra you hold correctly is not recognised, pick it, press Record and hold it for 3 seconds. Recordings stay in this browser.</p>
+        <div class="controls">
+          <select id="teachLabel"></select>
+          <button id="record">Record</button>
+        </div>
+        <div class="hint" id="teachStatus"></div>
+        <div id="taughtList"></div>
+        <div class="controls">
+          <button id="export">Export</button>
+          <button id="importBtn">Import</button>
+          <input type="file" id="importFile" accept="application/json" hidden>
+          <button id="clear">Clear all</button>
+        </div>
+      </div>
     </div>
   </div>
 </main>

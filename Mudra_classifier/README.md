@@ -10,6 +10,16 @@ Recognises 50 Bharatanatyam mudras (29 single-hand, 21 two-hand) from hand landm
 
 Use the mode menu ("Single-hand mudras only" or "Two-hand mudras only") when practising one group. That removes most remaining mix-ups.
 
+## Teaching your own version
+
+The training photos are close-ups on a green screen and mostly show one way of holding each mudra (for example Kartarimukha with ring and little fingers folded flat under the thumb, back of the hand to the camera). If you hold a mudra correctly but differently, the model may not know it.
+
+On the webpage, use the "Teach your version" panel: pick the mudra, press Record, hold it for 3 seconds. From then on, frames that closely match your recording use your label, and the page shows "Matched your taught version". Recordings stay in that browser only. Teach a mudra 2 or 3 times at slightly different angles for best results. "Export" saves them as `my_mudras.json`, and "Import" loads them in another browser.
+
+To build your recordings into the model itself:
+
+    python train_model.py --extra my_mudras.json
+
 ## Option 1: Browser (recommended)
 
 Live on Vercel, or locally from this folder:
@@ -41,5 +51,5 @@ On macOS, if the camera does not open: System Settings > Privacy & Security > Ca
 - `collect_data.py` images to `mudra_landmarks.npz` (pixel-space landmarks of up to 2 hands)
 - `train_model.py` trains both models, prints held-out accuracy, exports `mudra_model.p` and `web/model.json`
 - `app.py` desktop webcam app
-- `web/` browser app (`classifier.js` mirrors `features.py` and `recognizer.py`)
+- `web/` browser app (`classifier.js` mirrors `features.py` and `recognizer.py`, plus taught-sample matching)
 - `mudra_data.csv` older landmark export, no longer used by training (it lacks hand positions)

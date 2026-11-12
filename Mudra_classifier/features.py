@@ -4,8 +4,10 @@ Landmarks are always converted to pixel units first (x*W, y*H, z*W) so the
 camera's aspect ratio no longer distorts hand shape.
 
 Two models are used:
-  * one-hand model:  63 features = one hand's shape
-  * two-hand model: 130 features = both hands' shapes + how the hands sit
+  * one-hand model:  93 features = one hand's shape: 63 normalised landmark
+                     values + 15 finger joint bends + 15 fingertip distances
+                     (the last 30 do not change when the hand tilts or flips)
+  * two-hand model: 190 features = both hands' shapes + how the hands sit
                      relative to each other (offset, size ratio, gap)
 
 route() decides which model applies to a frame. The browser app
@@ -37,10 +39,32 @@ def palm_length(h):
     return np.linalg.norm(h[..., PALM, :2] - h[..., 0, :2], axis=-1)
 
 
+CHAINS = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12], [0, 13, 14, 15, 16], [0, 17, 18, 19, 20]]
+TIPS = [4, 8, 12, 16, 20]
+N_HAND = 93
+
+
+def finger_features(h):
+    """(..., 21, 3) -> (..., 30): cosine of each finger joint bend (15) and
+    fingertip distances to the wrist and to each other in palm lengths (15)."""
+    out = []
+    for ch in CHAINS:
+        for j in range(1, 4):
+            u = h[..., ch[j], :] - h[..., ch[j - 1], :]
+            v = h[..., ch[j + 1], :] - h[..., ch[j], :]
+            out.append((u * v).sum(-1) / (np.linalg.norm(u, axis=-1) * np.linalg.norm(v, axis=-1) + 1e-6))
+    pl = palm_length(h)
+    for i in range(5):
+        out.append(np.linalg.norm(h[..., TIPS[i], :2] - h[..., 0, :2], axis=-1) / pl)
+        for j in range(i + 1, 5):
+            out.append(np.linalg.norm(h[..., TIPS[i], :2] - h[..., TIPS[j], :2], axis=-1) / pl)
+    return np.stack(out, axis=-1)
+
+
 def hand_features(h):
-    """(..., 21, 3) pixel landmarks -> (..., 63) wrist-relative, unit palm length."""
-    rel = h - h[..., :1, :]
-    return (rel / palm_length(h)[..., None, None]).reshape(*h.shape[:-2], 63)
+    """(..., 21, 3) pixel landmarks -> (..., 93)."""
+    rel = (h - h[..., :1, :]) / palm_length(h)[..., None, None]
+    return np.concatenate([rel.reshape(*h.shape[:-2], 63), finger_features(h)], axis=-1)
 
 
 def hand_gap(a, b):
@@ -57,7 +81,7 @@ def order_pair(a, b):
 
 
 def pair_features(a, b):
-    """(..., 21, 3) x2 pixel landmarks -> (..., 130)."""
+    """(..., 21, 3) x2 pixel landmarks -> (..., 190)."""
     a, b = order_pair(a, b)
     pa, pb = palm_length(a), palm_length(b)
     mean = (pa + pb) / 2
@@ -67,14 +91,18 @@ def pair_features(a, b):
 
 
 def augment(hands, rng):
-    """Random mirror, rotation, scale and landmark noise. hands: (N, k, 21, 3)."""
+    """Random mirror, back-of-hand view, rotation, scale and landmark noise.
+    hands: (N, k, 21, 3)."""
     H = hands.copy()
     n = len(H)
     centre = H[..., :2].mean(axis=(1, 2), keepdims=True)
     H[..., :2] -= centre
     flip = rng.random(n) < 0.5
     H[flip, ..., 0] *= -1                       # mirror: selfie view, left vs right hand
-    t = np.deg2rad(rng.uniform(-15, 15, n))[:, None, None]
+    back = rng.random(n) < 0.5                  # same hand seen from the other side
+    H[back, ..., 0] *= -1
+    H[back, ..., 2] *= -1
+    t = np.deg2rad(rng.uniform(-40, 40, n))[:, None, None]
     x, y = H[..., 0].copy(), H[..., 1].copy()
     H[..., 0] = x * np.cos(t) - y * np.sin(t)
     H[..., 1] = x * np.sin(t) + y * np.cos(t)
